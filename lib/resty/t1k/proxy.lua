@@ -5,6 +5,7 @@ local request = require "resty.t1k.request"
 local response = require "resty.t1k.response"
 local server_pool = require "resty.t1k.server_pool"
 local utils = require "resty.t1k.utils"
+local uuid_gen = require "resty.t1k.uuid"
 
 local fmt = string.format
 local lower = string.lower
@@ -114,6 +115,21 @@ local function parse_detector_response(detector_data)
     }
 end
 
+local function dechunk_body(body)
+    if not body then return nil end
+    local result = {}
+    local pos = 1
+    while pos <= #body do
+        local crlf = body:find("\r\n", pos, true)
+        if not crlf then break end
+        local chunk_size = tonumber(body:sub(pos, crlf - 1), 16)
+        if not chunk_size or chunk_size == 0 then break end
+        result[#result + 1] = body:sub(crlf + 2, crlf + 1 + chunk_size)
+        pos = crlf + 2 + chunk_size + 2  -- skip chunk data + trailing \r\n
+    end
+    return #result > 0 and table.concat(result) or body
+end
+
 function _M.pass(t)
     t = t or {}
 
@@ -175,6 +191,14 @@ function _M.pass(t)
         server_pool.start_health_check(pool, t.health_check)
     end
 
+    -- Set UUID for request/response correlation
+    local ctx = ngx.ctx
+    if not ctx.t1k_uuid then
+        ctx.t1k_uuid = uuid_gen()
+    end
+
+    opts.uuid = ctx.t1k_uuid
+
     -- Phase 1: Request detection
     local req_ok, req_err, req_result = request.do_request(opts)
     if not req_ok then
@@ -204,20 +228,21 @@ function _M.pass(t)
         local ctx = ngx.ctx
         local t1k_context = ctx.t1k_context or ""
 
+        local rsp_body = dechunk_body(backend_res.body)
+
         -- Build request header as string for response detection
         local raw_request_header = build_backend_request():gsub("\r\n\r\n$", "")
 
         local rsp_ctx = {
             t1k_context = t1k_context,
             t1k_raw_request_header = raw_request_header,
-            t1k_rsp_body = backend_res.body,
+            t1k_rsp_body = rsp_body,
             t1k_rsp_status = backend_res.status,
             t1k_rsp_headers = backend_res.headers,
             t1k_rsp_begin_time = ngx.now() * 1e6,
         }
 
-        -- Get UUID from ctx if available
-        rsp_ctx.t1k_uuid = ngx.var.t1k_uuid or ""
+        rsp_ctx.t1k_uuid = ngx.ctx.t1k_uuid or ""
 
         local rsp_ok, rsp_err, rsp_result = response.do_response_detect(opts, rsp_ctx)
 

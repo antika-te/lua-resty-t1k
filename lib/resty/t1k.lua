@@ -122,6 +122,8 @@ function _M.do_access(t, handle)
         opts.remote_addr_idx = idx
     end
 
+    opts.uuid = ctx.t1k_uuid
+
     ok, err, result = request.do_request(opts)
     if not ok then
         return ok, err, result

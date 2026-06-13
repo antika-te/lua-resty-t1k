@@ -160,8 +160,10 @@ local function build_extra(opts)
         return nil, err, nil
     end
 
+    local req_uuid = opts.uuid or uuid.generate_v4()
+
     local extra = buffer:new({
-        KEY_EXTRA_UUID, ":", uuid.generate_v4(), "\n",
+        KEY_EXTRA_UUID, ":", req_uuid, "\n",
         KEY_EXTRA_REMOTE_ADDR, ":", src_ip, "\n",
         KEY_EXTRA_REMOTE_PORT, ":", src_port, "\n",
         KEY_EXTRA_LOCAL_ADDR, ":", local_ip, "\n",
