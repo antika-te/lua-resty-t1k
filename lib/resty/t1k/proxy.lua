@@ -52,6 +52,8 @@ local function build_backend_request()
             end
         end
     end
+    -- Force connection close so receive works
+    buf[#buf + 1] = "Connection: close\r\n"
     buf[#buf + 1] = "\r\n"
 
     return table.concat(buf)
