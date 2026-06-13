@@ -211,6 +211,8 @@ function _M.pass(t)
             t1k_context = t1k_context,
             t1k_raw_request_header = raw_request_header,
             t1k_rsp_body = backend_res.body,
+            t1k_rsp_status = backend_res.status,
+            t1k_rsp_headers = backend_res.headers,
             t1k_rsp_begin_time = ngx.now() * 1e6,
         }
 

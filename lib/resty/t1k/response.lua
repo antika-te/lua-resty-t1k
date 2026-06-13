@@ -17,18 +17,20 @@ local _M = {
 local TAG_HEAD_WITH_MASK_FIRST = bor(consts.TAG_HEAD, consts.MASK_FIRST)
 local TAG_CONTEXT_WITH_MASK_LAST = bor(consts.TAG_CONTEXT, consts.MASK_LAST)
 
-local function build_response_header()
-    local status = ngx.status or 200
+local function build_response_header(rsp_status, rsp_headers)
+    local status = rsp_status or ngx.status or 200
     local status_line = fmt("HTTP/1.1 %d OK\r\n", status)
 
     local buf = { status_line }
 
-    local headers = ngx.resp.get_headers(0, true)
-    for k, v in pairs(headers) do
-        if type(v) == "table" then
-            buf[#buf + 1] = fmt("%s: %s\r\n", k, table.concat(v, ", "))
-        else
-            buf[#buf + 1] = fmt("%s: %s\r\n", k, v)
+    local headers = rsp_headers or ngx.resp.get_headers(0, true)
+    if headers then
+        for k, v in pairs(headers) do
+            if type(v) == "table" then
+                buf[#buf + 1] = fmt("%s: %s\r\n", k, table.concat(v, ", "))
+            else
+                buf[#buf + 1] = fmt("%s: %s\r\n", k, v)
+            end
         end
     end
     buf[#buf + 1] = "\r\n"
@@ -171,7 +173,7 @@ function _M.do_response_detect(opts, ctx)
         end
     end
 
-    local response_header = build_response_header()
+    local response_header = build_response_header(ctx.t1k_rsp_status, ctx.t1k_rsp_headers)
     local response_body = build_response_body(ctx)
     local response_extra = build_response_extra(ctx)
 
