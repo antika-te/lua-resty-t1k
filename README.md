@@ -59,6 +59,65 @@ location / {
 }
 ```
 
+## Multi-Node and Response Detection (v1.2.0+)
+
+### Multi-Node Failover
+
+```lua
+local t = {
+    mode = "block",
+    servers = {
+        { host = "192.168.1.10", port = 8000 },
+        { host = "192.168.1.11", port = 8000, max_fails = 3, fail_timeout = 30 },
+        { host = "unix:/var/run/detector.sock" },
+    },
+    -- ... other options
+}
+```
+
+When multiple servers are configured, the module automatically fails over to the next healthy server on connection failure. Unhealthy servers are retried after `fail_timeout` seconds.
+
+### Response Detection
+
+Zero-config for monitor mode. Block mode requires one `include` line.
+
+```lua
+local t = {
+    mode = "block",
+    host = "127.0.0.1",
+    port = 8000,
+    response_mode = "monitor",   -- "monitor" (zero config) or "block" (needs include)
+    rsp_body_size = 4096,        -- max response body bytes to inspect, default 4096
+}
+```
+
+**Monitor mode** (zero config): Logs blocked responses via `ngx.log(WARN, ...)` but does not intercept.
+
+**Block mode**: Add one line to nginx.conf http block to enable response interception:
+
+```nginx
+# nginx.conf http block
+include /path/to/lua-resty-t1k/t1k_rsp.conf;
+```
+
+Then add `body_filter_by_lua_block`:
+
+```nginx
+location / {
+    access_by_lua_block { ... }
+
+    header_filter_by_lua_block {
+        local t1k = require "resty.t1k"
+        t1k.do_header_filter()
+    }
+
+    body_filter_by_lua_block {
+        local t1k = require "resty.t1k"
+        t1k.do_body_filter()
+    }
+}
+```
+
 ## Lua Resty T1K vs. C T1K
 
 [C T1K](https://t1k.chaitin.com/), as part of SafeLine's enterprise edition, is a deployment mode crafted in C language for enhanced performance.
@@ -67,7 +126,7 @@ It is compatible with all versions of Nginx and does not require deployment via 
 |                       | Lua Resty T1K | C T1K |
 |-----------------------|---------------|-------|
 | Request Detection     | ✅             | ✅     |
-| Response Detection    | ❌             | ✅     |
+| Response Detection    | ✅             | ✅     |
 | Health Checks*        | ❌             | ✅     |
 | Cookie Protection     | ❌             | ✅     |
 | Bot Protection        | ❌             | ✅     |

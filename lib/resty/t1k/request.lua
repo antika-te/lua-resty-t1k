@@ -4,6 +4,7 @@ local buffer = require "resty.t1k.buffer"
 local consts = require "resty.t1k.constants"
 local file = require "resty.t1k.file"
 local log = require "resty.t1k.log"
+local server_pool = require "resty.t1k.server_pool"
 local utils = require "resty.t1k.utils"
 local uuid = require "resty.t1k.uuid"
 
@@ -322,7 +323,45 @@ local function do_socket(opts, header, body, extra)
     return true, nil, t
 end
 
+local function do_socket_with_failover(pool, opts, header, body, extra)
+    local ok, err, t
+    local healthy_servers = server_pool.select_all_healthy(pool)
+    local srv
+
+    for i, server in ipairs(healthy_servers) do
+        local server_opts = {}
+        for k, v in pairs(opts) do
+            server_opts[k] = v
+        end
+        server_opts.host = server.host
+        server_opts.port = server.port
+        server_opts.uds = server.uds
+
+        ok, err, t = do_socket(server_opts, header, body, extra)
+        if ok then
+            server_pool.mark_success(server)
+            srv = server_pool.server_key(server)
+            return true, nil, t, srv
+        end
+
+        nlog(debug_fmt("failed to send to t1k server %s: %s, trying next", server_pool.server_key(server), err))
+        server_pool.mark_failed(server)
+    end
+
+    err = log_fmt("all t1k servers failed: %s", err)
+    return nil, err, nil, nil
+end
+
 function _M.do_request(opts)
+    local servers
+    if opts.servers then
+        servers = opts.servers
+    else
+        servers = { { host = opts.host, port = opts.port } }
+    end
+
+    local pool = server_pool.new(servers)
+
     local ok, err
     local header, body, extra, t
 
@@ -341,22 +380,29 @@ function _M.do_request(opts)
         return ok, err, nil
     end
 
-    ok, err, t = do_socket(opts, header, body, extra)
+    local srv
+    ok, err, t, srv = do_socket_with_failover(pool, opts, header, body, extra)
     if not ok then
         return ok, err, nil
     end
 
-    if opts.mode == consts.MODE_BLOCK then
+    if opts.mode == consts.MODE_BLOCK or opts.mode == consts.MODE_MONITOR then
         local extra_header = t[consts.TAG_EXTRA_HEADER]
         if extra_header then
             ngx.ctx.t1k_extra_header = extra_header
         end
     end
 
+    local t1k_context = t[consts.TAG_CONTEXT]
+    if t1k_context then
+        ngx.ctx.t1k_context = t1k_context
+    end
+
     local result = {
         action = t[consts.TAG_HEAD],
         status = t[consts.TAG_BODY],
         event_id = utils.get_event_id(t[consts.TAG_EXTRA_BODY]),
+        server = srv,
     }
 
     return true, nil, result
