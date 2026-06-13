@@ -118,6 +118,87 @@ location / {
 }
 ```
 
+### Proxy Mode (Zero Config)
+
+An alternative approach inspired by [t1k-go](https://github.com/chaitin/t1k-go). Use `content_by_lua_block` instead of `proxy_pass` to control the entire request/response flow. No nginx config changes required.
+
+```nginx
+location / {
+    content_by_lua_block {
+        local proxy = require "resty.t1k.proxy"
+        proxy.pass({
+            -- Detector config
+            mode          = "block",
+            host          = "127.0.0.1",
+            port          = 8000,
+
+            -- Multi-node (optional)
+            -- servers = {
+            --     { host = "10.0.0.1", port = 8000 },
+            --     { host = "10.0.0.2", port = 8000 },
+            -- },
+
+            -- Active health check (optional)
+            -- health_check = {
+            --     interval            = 10,    -- check interval in seconds
+            --     timeout             = 3000,  -- connect/read timeout in ms
+            --     healthy_threshold   = 2,     -- consecutive successes to mark healthy
+            --     unhealthy_threshold = 2,     -- consecutive failures to mark unhealthy
+            -- },
+
+            -- Backend upstream
+            backend       = "127.0.0.1:8080",
+
+            -- Response detection
+            response_mode = "block",
+            rsp_body_size = 4096,
+
+            -- Common options
+            connect_timeout   = 1000,
+            send_timeout      = 1000,
+            read_timeout      = 1000,
+            req_body_size     = 1024,
+            keepalive_size    = 256,
+            keepalive_timeout = 60000,
+        })
+    }
+}
+```
+
+Proxy mode supports request detection, response detection with blocking, multi-node failover, and active health checks — all without modifying nginx.conf.
+
+| Feature | access+filter mode | proxy mode |
+|---------|-------------------|------------|
+| Request detection & block | ✅ | ✅ |
+| Response detection monitor | ✅ zero config | ✅ zero config |
+| Response detection block | ❌ needs include | ✅ zero config |
+| Active health check | ❌ | ✅ |
+| Multi-node failover | ✅ | ✅ |
+
+### Active Health Check
+
+Available in proxy mode. The `health_check` option spawns a background timer that periodically probes each detector node using the T1K heartbeat protocol.
+
+```lua
+proxy.pass({
+    servers = {
+        { host = "10.0.0.1", port = 8000 },
+        { host = "10.0.0.2", port = 8000 },
+    },
+    health_check = {
+        interval            = 10,    -- seconds between checks
+        timeout             = 3000,  -- ms, connect/read timeout
+        healthy_threshold   = 2,     -- consecutive OKs to mark healthy
+        unhealthy_threshold = 2,     -- consecutive failures to mark unhealthy
+    },
+    -- ... other options
+})
+```
+
+- Passively, `max_fails` consecutive request failures will also mark a server unhealthy
+- Unhealthy servers are automatically retried after `fail_timeout` seconds
+- Health check runs once per worker, started on the first request
+
 ## Lua Resty T1K vs. C T1K
 
 [C T1K](https://t1k.chaitin.com/), as part of SafeLine's enterprise edition, is a deployment mode crafted in C language for enhanced performance.
@@ -127,9 +208,7 @@ It is compatible with all versions of Nginx and does not require deployment via 
 |-----------------------|---------------|-------|
 | Request Detection     | ✅             | ✅     |
 | Response Detection    | ✅             | ✅     |
-| Health Checks*        | ❌             | ✅     |
+| Health Checks         | ✅             | ✅     |
 | Cookie Protection     | ❌             | ✅     |
 | Bot Protection        | ❌             | ✅     |
 | Proxy-side Statistics | ❌             | ✅     |
-
-&ast; APISIX implements health check functionality for the `chaitin-waf` plugin. For more information, please see the [chaitin-waf documentation](https://apisix.apache.org/docs/apisix/next/plugins/chaitin-waf/).
