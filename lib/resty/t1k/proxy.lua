@@ -184,8 +184,11 @@ function _M.pass(t)
     end
 
     if opts.mode == consts.MODE_BLOCK and req_result.action == consts.ACTION_BLOCKED then
+        nlog(ngx.ERR, log_fmt("request blocked: event_id=%s", req_result.event_id or ""))
         handler.handle(req_result)
         return
+    elseif req_result.action == consts.ACTION_PASSED then
+        nlog(ngx.ERR, log_fmt("request passed: action=%s", req_result.action))
     end
 
     -- Phase 2: Fetch backend response
@@ -223,6 +226,10 @@ function _M.pass(t)
                 handler.handle(rsp_result)
                 return
             end
+        elseif rsp_ok and rsp_result then
+            nlog(ngx.ERR, log_fmt("response passed: action=%s", rsp_result.action))
+        elseif not rsp_ok then
+            nlog(log_fmt("response detection error: %s", rsp_err or "unknown"))
         end
     end
 
@@ -230,6 +237,9 @@ function _M.pass(t)
     ngx.status = backend_res.status
     for k, v in pairs(backend_res.headers) do
         ngx.header[k] = v
+    end
+    if backend_res.body then
+        ngx.header["Content-Length"] = #backend_res.body
     end
     ngx.print(backend_res.body)
 end
