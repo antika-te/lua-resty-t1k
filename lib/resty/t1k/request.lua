@@ -162,6 +162,9 @@ local function build_extra(opts)
 
     local req_uuid = opts.uuid or uuid.generate_v4()
 
+    local has_rsp = (opts.response_mode and opts.response_mode ~= consts.MODE_OFF) and "y" or "n"
+    local has_rsp_block = (opts.response_mode == consts.MODE_BLOCK) and "y" or "n"
+
     local extra = buffer:new({
         KEY_EXTRA_UUID, ":", req_uuid, "\n",
         KEY_EXTRA_REMOTE_ADDR, ":", src_ip, "\n",
@@ -172,8 +175,8 @@ local function build_extra(opts)
         KEY_EXTRA_SERVER_NAME, ":", ngx_var.server_name, "\n",
         KEY_EXTRA_PROXY_NAME, ":", ngx_var.hostname, "\n",
         KEY_EXTRA_REQ_BEGIN_TIME, ":", fmt("%.0f", ngx_req.start_time() * 1000000), "\n",
-        KEY_EXTRA_HAS_RSP_IF_OK, ":n\n",
-        KEY_EXTRA_HAS_RSP_IF_BLOCK, ":n\n"
+        KEY_EXTRA_HAS_RSP_IF_OK, ":", has_rsp, "\n",
+        KEY_EXTRA_HAS_RSP_IF_BLOCK, ":", has_rsp_block, "\n"
     })
 
     return true, nil, extra
@@ -405,6 +408,112 @@ function _M.do_request(opts)
         status = t[consts.TAG_BODY],
         event_id = utils.get_event_id(t[consts.TAG_EXTRA_BODY]),
         server = srv,
+    }
+
+    return true, nil, result
+end
+
+function _M.open_socket(opts)
+    local servers
+    if opts.servers then
+        servers = opts.servers
+    else
+        servers = { { host = opts.host, port = opts.port } }
+    end
+
+    local pool = server_pool.new(servers)
+    local healthy = server_pool.select_all_healthy(pool)
+
+    if #healthy == 0 then
+        return nil, "no healthy t1k servers"
+    end
+
+    local server = healthy[1]
+    local server_opts = {}
+    for k, v in pairs(opts) do
+        server_opts[k] = v
+    end
+    server_opts.host = server.host
+    server_opts.port = server.port
+    server_opts.uds = server.uds
+
+    local ok, err, sock, srv = get_socket(server_opts)
+    if not ok then
+        return nil, err
+    end
+
+    return sock, srv
+end
+
+function _M.do_request_on_socket(sock, opts, srv)
+    local ok, err, t
+    local header, body, extra
+
+    ok, err, header = build_header(opts)
+    if not ok then
+        return ok, err, nil
+    end
+
+    ok, err, body = build_body(opts)
+    if not ok then
+        return ok, err, nil
+    end
+
+    ok, err, extra = build_extra(opts)
+    if not ok then
+        return ok, err, nil
+    end
+
+    ok, err = do_send(sock, { char(TAG_HEAD_WITH_MASK_FIRST), utils.int_to_char_length(header:len()), header })
+    if not ok then
+        sock:close()
+        return ok, err, nil
+    end
+
+    if body ~= nil then
+        ok, err = do_send(sock, { char(consts.TAG_BODY), utils.int_to_char_length(body:len()), body })
+        if not ok then
+            sock:close()
+            return ok, err, nil
+        end
+    end
+
+    ok, err = do_send(sock, { T1K_PROTO_DATA, char(consts.TAG_EXTRA), utils.int_to_char_length(extra:len()), extra })
+    if not ok then
+        sock:close()
+        return ok, err, nil
+    end
+
+    -- TAG_STAT with Node identifier (required by detector for proxy identification)
+    local node_name = ngx.var.hostname or "openresty"
+    local stat_data = "Node:" .. node_name .. "\n"
+    ok, err = do_send(sock, { char(bor(consts.TAG_STAT, consts.MASK_LAST)), utils.int_to_char_length(#stat_data), stat_data })
+    if not ok then
+        sock:close()
+        return ok, err, nil
+    end
+
+    ok, err, t = receive_data(sock, srv)
+    if not ok then
+        return ok, err, nil
+    end
+
+    if opts.mode == consts.MODE_BLOCK or opts.mode == consts.MODE_MONITOR then
+        local extra_header = t[consts.TAG_EXTRA_HEADER]
+        if extra_header then
+            ngx.ctx.t1k_extra_header = extra_header
+        end
+    end
+
+    local t1k_context = t[consts.TAG_CONTEXT]
+    if t1k_context then
+        ngx.ctx.t1k_context = t1k_context
+    end
+
+    local result = {
+        action = t[consts.TAG_HEAD],
+        status = t[consts.TAG_BODY],
+        event_id = utils.get_event_id(t[consts.TAG_EXTRA_BODY]),
     }
 
     return true, nil, result

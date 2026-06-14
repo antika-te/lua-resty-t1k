@@ -178,6 +178,7 @@ function _M.pass(t)
     if resp_mode ~= consts.MODE_BLOCK and resp_mode ~= consts.MODE_MONITOR then
         resp_mode = consts.MODE_OFF
     end
+    opts.response_mode = resp_mode
 
     if t.remote_addr then
         local var, idx = utils.to_var_idx(t.remote_addr)
@@ -199,9 +200,18 @@ function _M.pass(t)
 
     opts.uuid = ctx.t1k_uuid
 
-    -- Phase 1: Request detection
-    local req_ok, req_err, req_result = request.do_request(opts)
+    -- Phase 0: Connect to detector (shared socket for request + response)
+    local sock, det_srv = request.open_socket(opts)
+    if not sock then
+        ngx.status = 500
+        ngx.say("detector unreachable: " .. (det_srv or "unknown"))
+        return
+    end
+
+    -- Phase 1: Request detection on shared socket
+    local req_ok, req_err, req_result = request.do_request_on_socket(sock, opts, det_srv)
     if not req_ok then
+        sock:close()
         ngx.status = 500
         ngx.say(req_err)
         return
@@ -209,6 +219,7 @@ function _M.pass(t)
 
     if opts.mode == consts.MODE_BLOCK and req_result.action == consts.ACTION_BLOCKED then
         nlog(ngx.ERR, log_fmt("request blocked: event_id=%s", req_result.event_id or ""))
+        sock:setkeepalive(opts.keepalive_timeout or 60000, opts.keepalive_size or 256)
         handler.handle(req_result)
         return
     elseif req_result.action == consts.ACTION_PASSED then
@@ -218,19 +229,18 @@ function _M.pass(t)
     -- Phase 2: Fetch backend response
     local backend_ok, backend_res, backend_err = _M.fetch_backend(backend_addr)
     if not backend_ok then
+        sock:setkeepalive(opts.keepalive_timeout or 60000, opts.keepalive_size or 256)
         ngx.status = 502
         ngx.say("backend error: ", backend_err)
         return
     end
 
-    -- Phase 3: Response detection
+    -- Phase 3: Response detection on SAME socket
     if resp_mode ~= consts.MODE_OFF then
         local ctx = ngx.ctx
         local t1k_context = ctx.t1k_context or ""
 
         local rsp_body = dechunk_body(backend_res.body)
-
-        -- Build request header as string for response detection
         local raw_request_header = build_backend_request():gsub("\r\n\r\n$", "")
 
         local rsp_ctx = {
@@ -240,15 +250,14 @@ function _M.pass(t)
             t1k_rsp_status = backend_res.status,
             t1k_rsp_headers = backend_res.headers,
             t1k_rsp_begin_time = ngx.now() * 1e6,
+            t1k_uuid = ngx.ctx.t1k_uuid or "",
         }
 
-        rsp_ctx.t1k_uuid = ngx.ctx.t1k_uuid or ""
-
-        local rsp_ok, rsp_err, rsp_result = response.do_response_detect(opts, rsp_ctx)
+        local rsp_ok, rsp_err, rsp_result = response.do_response_detect_on_socket(sock, opts, rsp_ctx, det_srv)
 
         if rsp_ok and rsp_result and rsp_result.action == consts.ACTION_BLOCKED then
             nlog(ngx.WARN, log_fmt("response blocked: event_id=%s", rsp_result.event_id or ""))
-
+            sock:setkeepalive(opts.keepalive_timeout or 60000, opts.keepalive_size or 256)
             if resp_mode == consts.MODE_BLOCK then
                 handler.handle(rsp_result)
                 return
@@ -259,6 +268,8 @@ function _M.pass(t)
             nlog(log_fmt("response detection error: %s", rsp_err or "unknown"))
         end
     end
+
+    sock:setkeepalive(opts.keepalive_timeout or 60000, opts.keepalive_size or 256)
 
     -- Phase 4: Forward response to client
     ngx.status = backend_res.status

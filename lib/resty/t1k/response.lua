@@ -182,7 +182,7 @@ function _M.do_response_detect(opts, ctx)
         return ok, err, nil
     end
 
-    local T1K_PROTO = "Proto:2\n"
+    local T1K_PROTO = "Proto:3\n"
     local T1K_PROTO_DATA = fmt("%s%s%s", char(consts.TAG_VERSION), utils.int_to_char_length(#T1K_PROTO), T1K_PROTO)
 
     ok, err = do_send(sock, { char(TAG_HEAD_WITH_MASK_FIRST), utils.int_to_char_length(#raw_request_header), raw_request_header })
@@ -215,7 +215,30 @@ function _M.do_response_detect(opts, ctx)
         return nil, err, nil
     end
 
-    ok, err = do_send(sock, { T1K_PROTO_DATA, char(TAG_CONTEXT_WITH_MASK_LAST), utils.int_to_char_length(#t1k_context), t1k_context })
+    ok, err = do_send(sock, { T1K_PROTO_DATA })
+    if not ok then
+        sock:close()
+        err = fmt("failed to send version to t1k server %s: %s", server, err)
+        return nil, err, nil
+    end
+
+    -- TAG_WEB_LOG (empty, required by protocol)
+    ok, err = do_send(sock, { char(consts.TAG_WEB_LOG), "\x00\x00\x00\x00" })
+    if not ok then
+        sock:close()
+        err = fmt("failed to send web log to t1k server %s: %s", server, err)
+        return nil, err, nil
+    end
+
+    -- TAG_STAT (empty, required by protocol)
+    ok, err = do_send(sock, { char(consts.TAG_STAT), "\x00\x00\x00\x00" })
+    if not ok then
+        sock:close()
+        err = fmt("failed to send stat to t1k server %s: %s", server, err)
+        return nil, err, nil
+    end
+
+    ok, err = do_send(sock, { char(TAG_CONTEXT_WITH_MASK_LAST), utils.int_to_char_length(#t1k_context), t1k_context })
     if not ok then
         sock:close()
         err = fmt("failed to send context to t1k server %s: %s", server, err)
@@ -230,6 +253,79 @@ function _M.do_response_detect(opts, ctx)
     ok, err = sock:setkeepalive(opts.keepalive_timeout, opts.keepalive_size)
     if not ok then
         sock:close()
+    end
+
+    local result = {
+        action = t[consts.TAG_HEAD],
+        status = t[consts.TAG_BODY],
+        event_id = utils.get_event_id(t[consts.TAG_EXTRA_BODY]),
+    }
+
+    return true, nil, result
+end
+
+function _M.do_response_detect_on_socket(sock, opts, ctx, server)
+    local ok, err, t
+
+    local t1k_context = ctx.t1k_context or ""
+    local raw_request_header = ctx.t1k_raw_request_header
+
+    if not raw_request_header then
+        raw_request_header = ngx.req.raw_header() or ""
+    end
+
+    local response_header = build_response_header(ctx.t1k_rsp_status, ctx.t1k_rsp_headers)
+    local response_body = build_response_body(ctx)
+    local response_extra = build_response_extra(ctx)
+
+    local T1K_PROTO = "Proto:3\n"
+    local T1K_PROTO_DATA = fmt("%s%s%s", char(consts.TAG_VERSION), utils.int_to_char_length(#T1K_PROTO), T1K_PROTO)
+
+    ok, err = do_send(sock, { char(TAG_HEAD_WITH_MASK_FIRST), utils.int_to_char_length(#raw_request_header), raw_request_header })
+    if not ok then
+        return nil, fmt("failed to send request header: %s", err), nil
+    end
+
+    ok, err = do_send(sock, { char(consts.TAG_RSP_HEAD), utils.int_to_char_length(#response_header), response_header })
+    if not ok then
+        return nil, fmt("failed to send response header: %s", err), nil
+    end
+
+    if response_body and #response_body > 0 then
+        ok, err = do_send(sock, { char(consts.TAG_RSP_BODY), utils.int_to_char_length(#response_body), response_body })
+        if not ok then
+            return nil, fmt("failed to send response body: %s", err), nil
+        end
+    end
+
+    ok, err = do_send(sock, { char(consts.TAG_RSP_EXTRA), utils.int_to_char_length(#response_extra), response_extra })
+    if not ok then
+        return nil, fmt("failed to send response extra: %s", err), nil
+    end
+
+    ok, err = do_send(sock, { T1K_PROTO_DATA })
+    if not ok then
+        return nil, fmt("failed to send version: %s", err), nil
+    end
+
+    ok, err = do_send(sock, { char(consts.TAG_WEB_LOG), "\x00\x00\x00\x00" })
+    if not ok then
+        return nil, fmt("failed to send web log: %s", err), nil
+    end
+
+    ok, err = do_send(sock, { char(consts.TAG_STAT), "\x00\x00\x00\x00" })
+    if not ok then
+        return nil, fmt("failed to send stat: %s", err), nil
+    end
+
+    ok, err = do_send(sock, { char(TAG_CONTEXT_WITH_MASK_LAST), utils.int_to_char_length(#t1k_context), t1k_context })
+    if not ok then
+        return nil, fmt("failed to send context: %s", err), nil
+    end
+
+    ok, err, t = receive_data(sock, server)
+    if not ok then
+        return ok, err, nil
     end
 
     local result = {
